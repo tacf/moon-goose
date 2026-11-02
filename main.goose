@@ -1,3 +1,5 @@
+import os;
+import parser.parser;
 
 enum Type {
     Nil,
@@ -69,6 +71,21 @@ fn is_truthy(v: Type) -> bool {
         _ => { return true; }
     }
     return true;
+}
+
+fn print_top(vm_stack: Type[>..<]&) {
+    ensure_stack_size(vm_stack, 1);
+    let stack_entry = vm_stack.pop();
+    var value: u8[>..] = "nil";
+    match stack_entry {
+        Nil         => { },
+        Boolean t   => { value = str(t.value); },
+        Integer  t  => { value = str(t.value); },
+        Float t     => { value = str(t.value); },
+        StringPtr t => { value = str(t.value); },
+        TablePtr  t => { value = str(t.value); },
+    }
+    print(value);
 }
 
 
@@ -147,49 +164,82 @@ fn arith_op(vm_stack: Type[>..<]&, kind: ArithOp) {
 }
 
 
-fn load_code() -> InstructionSet {
+// Post-order walk: children first, then the operator
+recursive fn gen_node(code: Op..[>..]&, nodes: Node[>..]&, i: i64) {
+    match nodes[i] {
+        IntLit n => { code.push(Op.PUSH { value: Type.Integer { value: n.v }}); },
+        FloatLit n => { code.push(Op.PUSH { value: Type.Float { value: n.v }}); },
+        NilLit => { code.push(Op.PUSH_NIL); },
+        TrueLit => { code.push(Op.PUSH_TRUE); },
+        FalseLit => { code.push(Op.PUSH_FALSE); },
+        // FIX?: -x compiles as 0 - x
+        Neg n => {
+            code.push(Op.PUSH { value: Type.Integer { value: 0 }});
+            gen_node(code, nodes, n.operand);
+            code.push(Op.SUB);
+        },
+        Bin n => {
+            gen_node(code, nodes, n.left);
+            gen_node(code, nodes, n.right);
+            match n.kind {
+                Add => { code.push(Op.ADD); },
+                Sub => { code.push(Op.SUB); },
+                Mul => { code.push(Op.MUL); },
+                Div => { code.push(Op.DIV); }
+            }
+        },
+        Print n => {
+            gen_node(code, nodes, n.expr);
+            code.push(Op.PRINT);
+        }
+    }
+}
+
+fn generate_bytecode(nodes: Node[>..]&, roots: i64[>..]&) -> InstructionSet {
     var code: Op..[>..] = [];
-
-    code.push(Op.PUSH { value: Type.Integer { value: 10 }});
-    code.push(Op.PUSH { value: Type.Integer { value: 20 }});
-    code.push(Op.ADD);
-    code.push(Op.PUSH { value: Type.Integer { value: 30 }});
-    code.push(Op.ADD);
-    code.push(Op.PUSH { value: Type.Integer { value: 2 }});
-    code.push(Op.MUL);
-    code.push(Op.PUSH { value: Type.Integer { value: 2 }});
-    code.push(Op.DIV);
-    code.push(Op.PRINT);
+    for r in roots { gen_node(code, nodes, r); }
     code.push(Op.HALT);
-
     return code;
 }
 
-fn main() {
-    
-    var code = load_code();
-
+fn run_vm(byte_code: Op..[>..]) {
     var vmStack: VMStack = [];
 
-    for instruction in code {
+    for instruction in byte_code {
         match instruction {
-            PUSH &op => vmStack.push(op.value),
-            PUSH_NIL => vmStack.push(Type.Nil),
-            PUSH_TRUE => vmStack.push(Type.Boolean { value: true}),
-            PUSH_FALSE => vmStack.push(Type.Boolean { value: false}),
-            ADD => arith_op(vmStack, ArithOp.Add),
-            MUL => arith_op(vmStack, ArithOp.Mul),
-            DIV => arith_op(vmStack, ArithOp.Div),
-            SUB => arith_op(vmStack, ArithOp.Sub),
-            AND => bool_op(vmStack, BoolOp.And),
-            OR => bool_op(vmStack, BoolOp.Or),
-            NOT => bool_op(vmStack, BoolOp.Not),
-            PRINT => {
-                ensure_stack_size(vmStack, 1);
-                print(vmStack.pop());
-            },
+            PUSH &op    => vmStack.push(op.value),
+            PUSH_NIL    => vmStack.push(Type.Nil),
+            PUSH_TRUE   => vmStack.push(Type.Boolean { value: true}),
+            PUSH_FALSE  => vmStack.push(Type.Boolean { value: false}),
+            ADD         => arith_op(vmStack, ArithOp.Add),
+            MUL         => arith_op(vmStack, ArithOp.Mul),
+            DIV         => arith_op(vmStack, ArithOp.Div),
+            SUB         => arith_op(vmStack, ArithOp.Sub),
+            AND         => bool_op(vmStack, BoolOp.And),
+            OR          => bool_op(vmStack, BoolOp.Or),
+            NOT         => bool_op(vmStack, BoolOp.Not),
+            PRINT       => print_top(vmStack),
             HALT => exit(0)
         }
     }
     print("Error: VM exited without a HALT operation")
+}
+
+fn main() {
+    let source: u8[>..] = [];
+    read_file("./samples/basic.lua", source);
+    //read_file("./samples/basic_w_error.lua", source);
+
+    
+    let nodes, roots, err = parse(source);
+    
+    if err.len > 0 {
+        print(err);
+        exit(1);
+    }
+    
+    // dump_ast(nodes, roots);
+
+    run_vm(generate_bytecode(nodes, roots));
+
 }
